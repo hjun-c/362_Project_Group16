@@ -96,7 +96,7 @@ void init_DMA(void) {
 }
 
 void init_spi1_slow(void) {
-  // Enable the RCC clock for SPI1 Port B
+  // Enable the RCC clock for SPI1 and Port B
   RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
   RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
 
@@ -152,4 +152,16 @@ void sdcard_io_high_speed(void) {
 
   // Enable the SPI channel
   SPI1->CR1 |= SPI_CR1_SPE;
+}
+
+void init_lcd_spi(void) {
+  // Enable the RCC clock for Port B
+  RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
+
+  // Configure PB8, PB11, and PB14 as output
+  GPIOB->MODER &= ~(GPIO_MODER_MODER8 | GPIO_MODER_MODER11 | GPIO_MODER_MODER14); // clear
+  GPIOB->MODER |= (GPIO_MODER_MODER8_0 | GPIO_MODER_MODER11_0 | GPIO_MODER_MODER14_0); // set to output mode
+
+  init_spi1_slow();
+  sdcard_io_high_speed();
 }
