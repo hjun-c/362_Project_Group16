@@ -18,20 +18,20 @@
 /*
 Function lists
 1. System Initialization
-  - initialize peripherals
-  - initialize gpio
+  - initialize peripherals (o)
+  - initialize gpio (o)
   - initialize internal clock
 2. Access SD card
-  - initialize spi1 (communicate with SD card)
-  - enable card
-  - disable card
+  - initialize spi1 (communicate with SD card) (o)
+  - enable card (o)
+  - disable card (o)
 3. Handle WAV file
   - open
   - close
   - read
 4. DAC
-  - initialize DAC
-  - configure DAC pins
+  - initialize DAC (o)
+  - configure DAC pins (o)
   - start song
   - stop song
 5. Timer
@@ -40,14 +40,13 @@ Function lists
   - initialize TIM3 (for button)
   - TIM3 interrupt handler
 6. TFT Display
-  - configure pins for display
-  - initialize spi2 (communicate with TFT)
+  - configure pins for display (o)
   - initialize TFT display
   - display song title
   - display playing mode
   - display stop mode
 7. Button
-  - configure buttons
+  - configure buttons (o)
   - read state of click button
   - read state of direction button
   - read state of home button
@@ -75,7 +74,7 @@ void init_button(void) {
   GPIOC->PUPDR |= (0x2) | (0x2 << 2) | (0x2 << 4) | (0x2 << 6); // set to be pulled down
 }
 
-void init_DMA(void) {
+void init_DAC(void) {
   // Enable the RCC clock for Port A
   RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
 
