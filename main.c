@@ -63,7 +63,6 @@ int main(void) {
 
 }
 
-// Enable GPIO port
 void init_button(void) {
   // Enable the RCC clock for Port C
   RCC->AHBENR |= RCC_AHBENR_GPIOCEN;
@@ -96,12 +95,61 @@ void init_DMA(void) {
   DAC->CR |= 0x1;
 }
 
-void init_TFT_Display(void) {
-  // Enable the RCC clock for Port B
+void init_spi1_slow(void) {
+  // Enable the RCC clock for SPI1 Port B
+  RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
   RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
+
+  // Configure PB3 - PB5
+  GPIOB->MODER &= ~(GPIO_MODER_MODER3 | GPIO_MODER_MODER4 | GPIO_MODER_MODER5); // clear
+  GPIOB->MODER |= (GPIO_MODER_MODER3_1 | GPIO_MODER_MODER4_1 | GPIO_MODER_MODER5_1); // set to alternate mode
+
+  // Set alternate function
+  GPIOB->AFR[0] &= ~(0xFFF << 12);
+
+  // SPI1 configuration
+  SPI1->CR1 = SPI_CR1_MSTR; // master selection
+  SPI1->CR1 |= SPI_CR1_BR | SPI_CR1_SSM | SPI_CR1_SSI;
+
+  // Set data size to 8 bit
+  SPI1->CR2 |= SPI_CR2_DS_0 | SPI_CR2_DS_1 | SPI_CR2_DS_2;
+  SPI1->CR2 &= ~SPI_CR2_DS_3;
+
+  // Set FIFO reception threshold bit to 1
+  SPI1->CR2 = SPI_CR2_FRXTH;
+
+  // Enable the SPI channel
+  SPI1->CR1 |= SPI_CR1_SPE;
 }
 
-void init_SD_Card(void) {
-  // Enable the RCC clock for Port B
-  RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
+void enable_sdcard(void) {
+  // Set PB2 low
+  GPIOB->BSRR = (0x1 << 18);
+}
+
+void disable_sdcard(void) {
+  // Set PB2 high
+  GPIOB->BSRR = (0x1 << 2);
+}
+
+void init_sdcard_io(void) {
+  init_spi1_slow();
+
+  // Set PB2 as an output
+  GPIOB->MODER &= ~(GPIO_MODER_MODER2); // clear
+  GPIOB->MODER |= ~(GPIO_MODER_MODER2_0); // set to output mode
+
+  disable_sdcard();
+}
+
+void sdcard_io_high_speed(void) {
+  // Disable the SPI1 channel
+  SPI1->CR1 &= ~SPI_CR1_SPE;
+
+  // Set the SPI1 BR so that the clock rate is 12MHz
+  SPI1->CR1 &= ~(0x7 << 3); // clear
+  SPI1->CR1 |= (0x1 << 3); // (f/4)
+
+  // Enable the SPI channel
+  SPI1->CR1 |= SPI_CR1_SPE;
 }
