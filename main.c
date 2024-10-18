@@ -9,13 +9,11 @@
 
 // Include librarires
 #include "stm32f0xx.h"
-#include "fatfs.h"
 
 // Define constants
 
 // Declare global variables
-FIL wavFile;
-UINT bytesRead;
+
 
 /*
 Function lists
@@ -54,48 +52,56 @@ Function lists
   - read state of direction button
   - read state of home button
   - button handler
-  8. 
+8.
 */
+
+// How to read file?
+
 
 
 int main(void) {
 
 }
-// Open the WAV file
-int openFile(const char* filename) {
-  if (f_open(&wavFile, filename, FA_READ) == FR_OK) {
-    return 1;
-  } else {
-    return 0;
-  }
+
+// Enable GPIO port
+void init_button(void) {
+  // Enable the RCC clock for Port C
+  RCC->AHBENR |= RCC_AHBENR_GPIOCEN;
+
+  // Configure pins PC0 – PC3 to be inputs
+  GPIOC->MODER &= ~((0x3) | (0x3 << 2) | (0x3 << 4) | (0x3 << 6)); // input mode
+
+  // Configure pins PC0 – PC3 to be internally pulled low
+  GPIOC->PUPDR &= ~((0x3 << 0) | (0x3 << 2) | (0x3 << 4) | (0x3 << 6)); // clear
+  GPIOC->PUPDR |= (0x2) | (0x2 << 2) | (0x2 << 4) | (0x2 << 6); // set to be pulled down
 }
 
-// Close the WAV file
-void closeFile() {
-  f_close(&wavFile);
+void init_DMA(void) {
+  // Enable the RCC clock for Port A
+  RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
+
+  // Configure PA4 as DAC output
+  GPIOA->MODER |= (0x3 << 8); // analog mode
+
+  // Enable the RCC clock for the DAC
+  RCC->APB1ENR |= RCC_APB1ENR_DACEN;
+
+  // Select a TIM6 TRGO trigger
+  DAC->CR &= ~((0x3 << 3) | (0x3 << 4) | (0x3 << 5)); // clear (TIM 6 TRGO event)
+
+  // Enable the trigger for the DAC
+  DAC->CR |= (0x1 << 2);
+
+  // Enable the DAC
+  DAC->CR |= 0x1;
 }
 
-// read WAV file
-int readFile(uint8_t* buffer, uint32_t size) {
-  f_read(&wavFile, buffer, size, &bytesRead);
-  return bytesRead;
+void init_TFT_Display(void) {
+  // Enable the RCC clock for Port B
+  RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
 }
 
-// Initialize TIM6 that triggers audio sample
-void init_tim6(void) {
-  RCC->APB1ENR |= RCC_APB1ENR_TIM6EN;
-
-  TIM6->PSC = 0;
-  TIM6->ARR = (48000000 / sampleRate) - 1;
-
-  TIM6->DIER |= TIM_DIER_UIE;
-  NVIC_EnableIRQ(TIM6_DAC_IRQn);
-}
-
-// Interrupt handler for TIM6
-void TIM6_DAC_IRQHandler(void) {
-  if (TIM6->SR & TIM_SR_UIF) { // check if interrupt flag was updated
-    TIM6->SR &= ~TIM_SR_UIF; // clear the interrupt flag
-    playNextSong(); // play next song
-  }
+void init_SD_Card(void) {
+  // Enable the RCC clock for Port B
+  RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
 }
