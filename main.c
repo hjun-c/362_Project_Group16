@@ -13,7 +13,7 @@
 
 // Define constants
 #define RATE 20000
-#define DEBOUNCE_TIME 50
+#define DEBOUNCE_TIME 15
 
 // Declare global variables
 FIL file;
@@ -114,10 +114,10 @@ void scan_buttons(void) {
     if (button_state & 0x2) {
       // move cursor down
     }
-    if (button_state & 0x8) {
+    if (button_state & 0x4) {
       // select
     }
-    if (button_state & 0xF) {
+    if (button_state & 0x8) {
       // back to song list
     }
   }
