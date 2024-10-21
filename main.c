@@ -14,6 +14,7 @@
 // Define constants
 #define RATE 20000
 #define DEBOUNCE_TIME 15
+#define BUFFER_SIZE 4096
 
 // Declare global variables
 FIL file;
@@ -23,6 +24,8 @@ FRESULT fr;
 UINT bytesRead;
 int button_state = 0;
 int debounce_counter = 0;
+int samp_freq = 0;
+uint8_t buffer[BUFFER_SIZE];
 
 // Function Declaration
 void internal_clock();
@@ -54,8 +57,7 @@ void display_song_list(void);
 void display_playing_song(void);
 void display_song_stopped(void);
 //==============================
-int open_file(char filename[]);
-void read_file(void);
+void read_file(char filename[]);
 
 // structure of WAV file header (for storing information)
 struct WavFileHeader {
@@ -171,7 +173,7 @@ void init_tim6(void) {
 
   // Set the prescaler and reload value
   TIM6->PSC = 100 - 1;
-  TIM6->ARR = (48000000 / (RATE * (TIM6->ARR + 1))) - 1;
+  TIM6->ARR = (48000000 / (header.sample_rate * (TIM6->ARR + 1))) - 1;
 
   // Set the value that enables a TRGO on an Update event
   TIM6->CR2 &= ~((0x3 << 4) | (0x3 << 5) | (0x3 << 6)); // clear
@@ -201,10 +203,10 @@ void TIM6_DAC_IRQHandler(void) {
 }
 
 void play_song(char* song_title) {
-  open_file(song_title);
-  if (fr == FR_OK) {
-    read_file();
-  }
+  read_file(song_title);
+  f_lseek(&file, 0); // move pointer
+  f_read(&file, &buffer[0], BUFFER_SIZE, &bytesRead); // read audio data
+  // send buffer to dma
 }
 
 void stop_song(void) {
@@ -314,10 +316,12 @@ void display_song_stopped(void) {
 
 }
 
-int open_file(char filename[]) {
-  fr = f_open(&file, filename, FA_READ);
-}
+void read_file(char filename[]) {
+  fr = f_mount(&fatfs, "", 1);
 
-void read_file(void) {
-  f_read(&file, &header, sizeof header, &bytesRead);
+  if (fr == FR_OK) {
+    if (f_open(&file, filename, FA_READ) == FR_OK) {
+        fr = f_read(&file, &header, sizeof(header), bytesRead);
+    }
+  }
 }
