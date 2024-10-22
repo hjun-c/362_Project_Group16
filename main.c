@@ -12,23 +12,26 @@
 #include "ff.h"
 
 // Define constants
-//#define HALF_BUFFER_SIZE 4000 // for half-transfer DMA
 #define AUDIO_BUFFER_SIZE 8000
+#define HALF_BUFFER_SIZE 4000
 #define DEBOUNCE_TIME 15
+#define MAX_SONGS 10
 
 // Declare global variables
-uint16_t *data_buffer; // buffer for original data
-uint8_t audio_buffer[AUDIO_BUFFER_SIZE]; // buffer for half-transfer
-uint32_t bytes_read = 0;
-uint32_t current_sample = 0;
 FIL file;
 FATFS fatfs;
 FRESULT fr;
+uint32_t bytes_read = 0;
+uint32_t bytes_unread = 0;
+uint8_t audio_buffer[AUDIO_BUFFER_SIZE]; // buffer for DMA half-transfer
 int debounce_counter = 0;
 int button_state = 0;
 int is_playing = 0;
 int is_stopped = 0;
-int offset = 0;
+int data_offset = 0; // current offset of data to be transferred by DMA
+int buffer_offset = 0; // current offset of audio buffer
+char* filename; // song title
+char song_list[MAX_SONGS]; // list of song titles in SD card
 
 // Function Declaration
 
@@ -70,7 +73,7 @@ void scan_buttons(void) {
   if (debounce_counter > 0) {
     debounce_counter--;
     return;
-  }
+  } // need to check how to set debounce delay
 
   // Check which button was pressed
   int new_button_state = (GPIOC->IDR & 0xF);
@@ -80,16 +83,16 @@ void scan_buttons(void) {
     debounce_counter = DEBOUNCE_TIME;
 
     if (button_state & 0x1) {
-      handle_button1;
+      handle_button1();
     }
     if (button_state & 0x2) {
-      handle_button2;
+      handle_button2();
     }
     if (button_state & 0x4) {
-      handle_button3;
+      handle_button3();
     }
     if (button_state & 0x8) {
-      handle_button4;
+      handle_button4();
     }
   }
 }
@@ -142,8 +145,8 @@ void init_tim6(void) {
   RCC->APB1ENR |= RCC_APB1ENR_TIM6EN;
 
   // Set the prescaler and reload value
-  TIM6->PSC = 100 - 1;
-  TIM6->ARR = (48000000 / (header.sample_rate * (TIM6->ARR + 1))) - 1;
+  TIM6->ARR = 100 - 1;
+  TIM6->PSC = (48000000 / (header.sample_rate * (TIM6->ARR + 1))) - 1;
 
   // Set the value that enables a TRGO on an Update event
   TIM6->CR2 &= ~((0x3 << 4) | (0x3 << 5) | (0x3 << 6)); // clear
@@ -159,62 +162,128 @@ void init_tim6(void) {
   TIM6->CR1 |= TIM_CR1_CEN;
 }
 
+void enable_tim6(void) {
+  TIM6->CR1 |= TIM_CR1_CEN;
+}
+
+void disable_tim6(void) {
+  TIM6->CR1 &= ~TIM_CR1_CEN;
+}
+
 void TIM6_DAC_IRQHandler(void) {
   // Acknowledge the interrupt
   if (TIM6->SR & TIM_SR_UIF) {
     TIM6->SR &= ~TIM_SR_UIF; // clear the update interrupt flag
   }
-
-  // Output the next sample to the DAC
-  offset += 1;
-  if (offset >= header.subchunk2_size) {
-    offset -= header.subchunk2_size;
-  }
-
-  int sample = data_buffer[offset];
-  sample = (sample >> 4) + 2048;
-  if (sample > 4096) {
-    sample = 4096; // clip
-  } else if (sample < 0) {
-    sample = 0; // clip
-  }
-
-  // Send data to DAC->DHR12R1
-  DAC->DHR12R1 = sample;
-  DAC->SWTRIGR |= DAC_SWTRIGR_SWTRIG1; // do we need this?
 }
 
-void get_audio_data(char* filename) {
+void load_header(void) {
   fr = f_mount(&fatfs, "", 1);
 
   if (fr == FR_OK) {
     if (f_open(&file, filename, FA_READ) == FR_OK) {
         fr = f_read(&file, &header, sizeof(header), &bytes_read);
+        data_offset += bytes_read;
+    }
+  }
+}
 
-        data_buffer = (uint16_t*)malloc(header.subchunk2_size); // allocate() might not be allowed
-        fr = f_lseek(&file, bytes_read);
-        fr = f_read(&file, data_buffer, header.subchunk2_size, &bytes_read);
-        fclose(&file);
-    }  
+void load_audio_data(uint32_t bytes_to_read) {
+  fr = f_lseek(&file, data_offset);
+  if (fr == FR_OK) {
+    fr = f_read(&file, audio_buffer[buffer_offset], bytes_to_read, &bytes_read);
+    if (fr == FR_OK) {
+      data_offset += bytes_read;
+      bytes_unread = bytes_to_read - bytes_read;
+      buffer_offset += bytes_read;
+      if (buffer_offset >= AUDIO_BUFFER_SIZE) {
+        buffer_offset = 0;
+      }
+    }
+  }
+}
+
+void init_dma(void) {
+  // Enable the RCC clock to the DMA controller
+  RCC->AHBENR |= RCC_AHBENR_DMA1EN;
+
+  // Turn off the enable bit for the channel
+  DMA1_Channel3->CCR &= ~DMA_CCR_EN;
+
+  // Set CMAR to the address of the msg array
+  DMA1_Channel3->CMAR |= (uint32_t)audio_buffer;
+
+  // Set CPAR to the address of the GPIOB_ODR register
+  DMA1_Channel3->CPAR |= (uint32_t)(&(DAC->DHR12L1));
+
+  // Set CNDTR
+  DMA1_Channel3->CNDTR = HALF_BUFFER_SIZE; // 4000 bytes
+
+  // Set the DIR for copying from-memory-to-peripheral
+  DMA1_Channel3->CCR |= DMA_CCR_DIR;
+
+  // Set the MINC to increment the CMAR for every transfer
+  DMA1_Channel3->CCR |= DMA_CCR_MINC;
+
+  // Set the size of M and P to 16-bit
+  DMA1_Channel3->CCR |= DMA_CCR_MSIZE_0 | DMA_CCR_PSIZE_1;
+
+  // Set the channel for CIRC operation
+  DMA1_Channel3->CCR |= DMA_CCR_CIRC;
+  
+  // Enable half-transfer
+  DMA1_Channel3->CCR |= DMA_CCR_HTIE;
+
+  // Enable transfer-complete interrupt
+  DMA1_Channel3->CCR |= DMA_CCR_TCIE;
+
+  // Enable DMA channel
+  DMA1_Channel3->CCR |= DMA_CCR_EN;
+
+  // Enable DMA1 channel3 interrupt
+  NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
+}
+
+void enable_dma(void) {
+  DMA1_Channel1->CCR |= DMA_CCR_CIRC;
+}
+
+void disable_dma(void) {
+  DMA1_Channel1->CCR &= ~DMA_CCR_CIRC;
+}
+
+void DMA1_Channel3_IRQHandler(void) {
+  if (DMA1->ISR & DMA_ISR_HTIF3) {
+    DMA1->IFCR |= DMA_IFCR_CHTIF3; // clear half-transfer interrupt flag
+    load_audio_data(HALF_BUFFER_SIZE); 
+  }
+
+  if (DMA1->ISR & DMA_ISR_TCIF3) {
+    DMA1->IFCR |= DMA_IFCR_CTCIF3; // clear transfer-complete interrupt flag
+    load_audio_data(HALF_BUFFER_SIZE);
   }
 }
 
 void stop_song(void) {
-  // Disable the DAC
-  DAC->CR &= ~DAC_CR_EN1;
+  disable_dma();
+  disable_tim6();
+  data_offset = f_tell(&file); // save current file (data) position
 }
 
 void resume_song(void) {
-  // Enable the DAC
-  DAC->CR |= DAC_CR_EN1;
+  if (bytes_unread > 0) {
+    load_audio_data(bytes_unread);
+  }
+  enable_dma();
+  enable_tim6();
 }
 
 void handle_button1(void) {
-  spi_cmd(); // move the cursor up
+  // move the cursor up
 }
 
 void handle_button2(void) {
-  spi_cmd(); // move the cursor down
+  // move the cursor down
 }
 
 void handle_button3(void) {
@@ -222,7 +291,7 @@ void handle_button3(void) {
   if (!is_playing) {
     is_playing = 1;
     is_stopped = 0;
-    resume_song();
+    // play song
   }
 }
 
@@ -239,8 +308,19 @@ void handle_button4(void) {
   }
 }
 
+// Read the file name in SD card and store them in a song list
+void read_song_list(void) {
+
+}
+
+// Display a song list on TFT display
 void display_song_list(void) {
 
+}
+
+// Read input from the button and determine which song was selected
+void read_selected_song(void) {
+  
 }
 
 //===============================================================================================================
@@ -304,10 +384,6 @@ void sdcard_io_high_speed(void) {
   SPI1->CR1 |= SPI_CR1_SPE;
 }
 
-void init_sd_card(void) {
-  f_mount(&fatfs, "", 0);
-}
-
 void init_lcd_spi(void) {
   // Enable the RCC clock for Port B
   RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
@@ -319,67 +395,3 @@ void init_lcd_spi(void) {
   init_spi1_slow();
   sdcard_io_high_speed();
 }
-
-//===============================================================================================================
-// Code using DMA (half-transfer)
-
-// void init_dma(void) {
-//   // Enable the RCC clock to the DMA controller
-//   RCC->AHBENR |= RCC_AHBENR_DMA1EN;
-
-//   // Turn off the enable bit for the channel
-//   DMA1_Channel3->CCR &= ~DMA_CCR_EN;
-
-//   // Set CMAR to the address of the msg array
-//   DMA1_Channel3->CMAR |= (uint32_t)audio_buffer;
-
-//   // Set CPAR to the address of the GPIOB_ODR register
-//   DMA1_Channel3->CPAR |= (uint32_t)(&(DAC->DHR12L1));
-
-//   // Set CNDTR to 8
-//   DMA1_Channel3->CNDTR = HALF_BUFFER_SIZE; // (4000 bytes)
-
-//   // Set the DIR for copying from-memory-to-peripheral
-//   DMA1_Channel3->CCR |= DMA_CCR_DIR;
-
-//   // Set the MINC to increment the CMAR for every transfer
-//   DMA1_Channel3->CCR |= DMA_CCR_MINC;
-
-//   // Set the size of M and P to 16-bit
-//   DMA1_Channel3->CCR |= DMA_CCR_MSIZE_0 | DMA_CCR_PSIZE_1;
-
-//   // Set the channel for CIRC operation
-//   DMA1_Channel3->CCR |= DMA_CCR_CIRC;
-  
-//   // Enable half-transfer
-//   DMA1_Channel3->CCR |= DMA_CCR_HTIE;
-
-//   // Enable transfer-complete interrupt
-//   DMA1_Channel3->CCR |= DMA_CCR_TCIE;
-
-//   // Enable DMA channel
-//   DMA1_Channel3->CCR |= DMA_CCR_EN;
-
-//   // Enable DMA1 channel3 interrupt
-//   NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
-// }
-
-// void DMA1_Channel3_IRQHandler(void) {
-//   if (DMA1->ISR & DMA_ISR_HTIF3) {
-//     DMA1->IFCR |= DMA_IFCR_CHTIF3; // clear half-transfer interrupt flag
-  
-//     load_audio_data(audio_buffer, HALF_BUFFER_SIZE);
-//   }
-
-//   if (DMA1->ISR & DMA_ISR_TCIF3) {
-//     DMA1->IFCR |= DMA_IFCR_CTCIF3; // clear transfer-complete interrupt flag
-
-//     load_audio_data(audio_buffer + HALF_BUFFER_SIZE, HALF_BUFFER_SIZE);
-//   }
-// }
-
-// void load_audio_data(uint8_t* audio_buffer, uint32_t buffer_size) {
-//   for (uint32_t i = 0; i < buffer_size; i++) {
-//     audio_buffer[i] = data_buffer[i];
-//   }
-// }
