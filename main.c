@@ -12,73 +12,42 @@
 #include "ff.h"
 
 // Define constants
-#define RATE 20000
+//#define HALF_BUFFER_SIZE 4000 // for half-transfer DMA
+#define AUDIO_BUFFER_SIZE 8000
 #define DEBOUNCE_TIME 15
-#define BUFFER_SIZE 4096
 
 // Declare global variables
+uint16_t *data_buffer; // buffer for original data
+uint8_t audio_buffer[AUDIO_BUFFER_SIZE]; // buffer for half-transfer
+uint32_t bytes_read = 0;
+uint32_t current_sample = 0;
 FIL file;
-DIR Dir;
 FATFS fatfs;
 FRESULT fr;
-UINT bytesRead;
-int button_state = 0;
 int debounce_counter = 0;
-int samp_freq = 0;
-uint8_t buffer[BUFFER_SIZE];
+int button_state = 0;
+int is_playing = 0;
+int is_stopped = 0;
+int offset = 0;
 
 // Function Declaration
-void internal_clock();
-//==============================
-void init_buttons(void);
-void scan_buttons(void);
-void init_tim7(void);
-void TIM7_IRQHandler(void);
-//==============================
-void init_DAC(void);
-void init_tim6(void);
-void TIM6_DAC_IRQHandler(void);
-void play_song(char* song_title);
-void stop_song(void);
-//==============================
-void init_spi1_slow(void);
-void enable_sdcard(void);
-void disable_sdcard(void);
-void init_sdcard_io(void);
-void sdcard_io_high_speed(void);
-void init_sd_card(void);
-//==============================
-void init_lcd_spi(void);
-void handle_button1(void);
-void handle_button2(void);
-void handle_button3(void);
-void handle_button4(void);
-void display_song_list(void);
-void display_playing_song(void);
-void display_song_stopped(void);
-//==============================
-void read_file(char filename[]);
 
-// structure of WAV file header (for storing information)
+// Structure of WAV File Header
 struct WavFileHeader {
-  char ck_id[4]; // chunk id
-  int ck_size; // chunk size
-  char sub_ck_id[4]; // sub chunk 1 id
-  int sub_ck_size; // sub chuck 1 size
-  int audio_format;
-  int num_channels;
+  char chunk_id[4];
+  int chunk_size;
+  int format;
+  char subchunk1_id[4];
+  int subchunk1_size;
+  short int audio_format;
+  short int num_channels;
   int sample_rate;
   int byte_rate;
-  int block_align;
-  int bits_per_sample;
-  char sub_ck2_id[4]; // sub chunk 2 id
-  int sub_ck2_size; // sub chunk 2 size
-  int data_size;
+  short int block_align;
+  short int bits_per_sample;
+  char subchunk2_id[4];
+  int subchunk2_size;
 } header;
-
-int main(void) {
-  internal_clock();
-}
 
 void init_buttons(void) {
   // Enable the RCC clock for Port C
@@ -111,16 +80,16 @@ void scan_buttons(void) {
     debounce_counter = DEBOUNCE_TIME;
 
     if (button_state & 0x1) {
-      // move cursor up
+      handle_button1;
     }
     if (button_state & 0x2) {
-      // move cursor down
+      handle_button2;
     }
     if (button_state & 0x4) {
-      // select
+      handle_button3;
     }
     if (button_state & 0x8) {
-      // back to song list
+      handle_button4;
     }
   }
 }
@@ -130,6 +99,7 @@ void init_tim7(void) {
   RCC->APB1ENR |= RCC_APB1ENR_TIM7EN;
 
   // Set the Prescaler (PSC) and Auto-Reload Register (ARR)
+  // Frequency: 1ms
   TIM7->PSC = 480-1;
   TIM7->ARR = 100-1;
 
@@ -147,7 +117,7 @@ void TIM7_IRQHandler(void) {
   scan_buttons();
 }
 
-void init_DAC(void) {
+void init_dac(void) {
   // Enable the RCC clock for Port A
   RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
 
@@ -196,23 +166,85 @@ void TIM6_DAC_IRQHandler(void) {
   }
 
   // Output the next sample to the DAC
-  int samp;
+  offset += 1;
+  if (offset >= header.subchunk2_size) {
+    offset -= header.subchunk2_size;
+  }
+
+  int sample = data_buffer[offset];
+  sample = (sample >> 4) + 2048;
+  if (sample > 4096) {
+    sample = 4096; // clip
+  } else if (sample < 0) {
+    sample = 0; // clip
+  }
 
   // Send data to DAC->DHR12R1
-  DAC->DHR12R1 = samp;
+  DAC->DHR12R1 = sample;
+  DAC->SWTRIGR |= DAC_SWTRIGR_SWTRIG1; // do we need this?
 }
 
-void play_song(char* song_title) {
-  read_file(song_title);
-  f_lseek(&file, 0); // move pointer
-  f_read(&file, &buffer[0], BUFFER_SIZE, &bytesRead); // read audio data
-  // send buffer to dma
+void get_audio_data(char* filename) {
+  fr = f_mount(&fatfs, "", 1);
+
+  if (fr == FR_OK) {
+    if (f_open(&file, filename, FA_READ) == FR_OK) {
+        fr = f_read(&file, &header, sizeof(header), &bytes_read);
+
+        data_buffer = (uint16_t*)malloc(header.subchunk2_size); // allocate() might not be allowed
+        fr = f_lseek(&file, bytes_read);
+        fr = f_read(&file, data_buffer, header.subchunk2_size, &bytes_read);
+        fclose(&file);
+    }  
+  }
 }
 
 void stop_song(void) {
+  // Disable the DAC
+  DAC->CR &= ~DAC_CR_EN1;
+}
+
+void resume_song(void) {
+  // Enable the DAC
+  DAC->CR |= DAC_CR_EN1;
+}
+
+void handle_button1(void) {
+  spi_cmd(); // move the cursor up
+}
+
+void handle_button2(void) {
+  spi_cmd(); // move the cursor down
+}
+
+void handle_button3(void) {
+  // click button
+  if (!is_playing) {
+    is_playing = 1;
+    is_stopped = 0;
+    resume_song();
+  }
+}
+
+void handle_button4(void) {
+  // resume / stop button
+  if ((is_playing == 1) && (is_stopped == 0)) {
+    stop_song();
+    is_playing = 0;
+    is_stopped = 1;
+  } else if ((is_playing == 0) && (is_stopped == 1)) {
+    resume_song();
+    is_playing = 1;
+    is_stopped = 0;
+  }
+}
+
+void display_song_list(void) {
 
 }
 
+//===============================================================================================================
+// Additional instruction on Lab7 manual
 void init_spi1_slow(void) {
   // Enable the RCC clock for SPI1 and Port B
   RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
@@ -288,40 +320,66 @@ void init_lcd_spi(void) {
   sdcard_io_high_speed();
 }
 
-void handle_button1(void) {
-  spi_cmd(); // move the cursor up
-}
+//===============================================================================================================
+// Code using DMA (half-transfer)
 
-void handle_button2(void) {
-  spi_cmd(); // move the cursor down
-}
+// void init_dma(void) {
+//   // Enable the RCC clock to the DMA controller
+//   RCC->AHBENR |= RCC_AHBENR_DMA1EN;
 
-void handle_button3(void) {
-  spi_cmd(); // move the cursor to the home position
-}
+//   // Turn off the enable bit for the channel
+//   DMA1_Channel3->CCR &= ~DMA_CCR_EN;
 
-void handle_button4(void) {
-  // cursor doesn't needed
-}
+//   // Set CMAR to the address of the msg array
+//   DMA1_Channel3->CMAR |= (uint32_t)audio_buffer;
 
-void display_song_list(void) {
+//   // Set CPAR to the address of the GPIOB_ODR register
+//   DMA1_Channel3->CPAR |= (uint32_t)(&(DAC->DHR12L1));
 
-}
+//   // Set CNDTR to 8
+//   DMA1_Channel3->CNDTR = HALF_BUFFER_SIZE; // (4000 bytes)
 
-void display_playing_song(void) {
+//   // Set the DIR for copying from-memory-to-peripheral
+//   DMA1_Channel3->CCR |= DMA_CCR_DIR;
 
-}
+//   // Set the MINC to increment the CMAR for every transfer
+//   DMA1_Channel3->CCR |= DMA_CCR_MINC;
 
-void display_song_stopped(void) {
+//   // Set the size of M and P to 16-bit
+//   DMA1_Channel3->CCR |= DMA_CCR_MSIZE_0 | DMA_CCR_PSIZE_1;
 
-}
+//   // Set the channel for CIRC operation
+//   DMA1_Channel3->CCR |= DMA_CCR_CIRC;
+  
+//   // Enable half-transfer
+//   DMA1_Channel3->CCR |= DMA_CCR_HTIE;
 
-void read_file(char filename[]) {
-  fr = f_mount(&fatfs, "", 1);
+//   // Enable transfer-complete interrupt
+//   DMA1_Channel3->CCR |= DMA_CCR_TCIE;
 
-  if (fr == FR_OK) {
-    if (f_open(&file, filename, FA_READ) == FR_OK) {
-        fr = f_read(&file, &header, sizeof(header), bytesRead);
-    }
-  }
-}
+//   // Enable DMA channel
+//   DMA1_Channel3->CCR |= DMA_CCR_EN;
+
+//   // Enable DMA1 channel3 interrupt
+//   NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
+// }
+
+// void DMA1_Channel3_IRQHandler(void) {
+//   if (DMA1->ISR & DMA_ISR_HTIF3) {
+//     DMA1->IFCR |= DMA_IFCR_CHTIF3; // clear half-transfer interrupt flag
+  
+//     load_audio_data(audio_buffer, HALF_BUFFER_SIZE);
+//   }
+
+//   if (DMA1->ISR & DMA_ISR_TCIF3) {
+//     DMA1->IFCR |= DMA_IFCR_CTCIF3; // clear transfer-complete interrupt flag
+
+//     load_audio_data(audio_buffer + HALF_BUFFER_SIZE, HALF_BUFFER_SIZE);
+//   }
+// }
+
+// void load_audio_data(uint8_t* audio_buffer, uint32_t buffer_size) {
+//   for (uint32_t i = 0; i < buffer_size; i++) {
+//     audio_buffer[i] = data_buffer[i];
+//   }
+// }
