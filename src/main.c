@@ -22,6 +22,29 @@
 #define TITLE_X_POS 30
 #define Y_SPACING 20
 
+// structure of song list from WAV file
+typedef struct {
+  char song_title[MAX_SONGS][MAX_TITLE_LENGTH];  
+  int count;
+} SongInformation;
+
+// Structure of WAV File Header
+typedef struct {
+  char chunk_id[4];
+  int chunk_size;
+  int format;
+  char subchunk1_id[4];
+  int subchunk1_size;
+  short int audio_format;
+  short int num_channels;
+  int sample_rate;
+  int byte_rate;
+  short int block_align;
+  short int bits_per_sample;
+  char subchunk2_id[4];
+  int subchunk2_size;
+} WavHeader;
+
 // Declare global variables
 FIL file;
 FATFS fatfs;
@@ -30,6 +53,8 @@ DIR dir; // structure for the directory
 FILINFO fno; // File information structure
 uint32_t bytes_read = 0;
 uint16_t audio_buffer[AUDIO_BUFFER_SIZE]; // buffer for DMA half-transfer
+WavHeader wav_heaer;
+SongInformation song_infor;
 int debounce_counter = 0;
 int button_state = 0;
 int is_playing = 0;
@@ -68,9 +93,9 @@ void DMA1_Channel3_IRQHandler(void);
 void play_song(void);
 void stop_song(void);
 void resume_song(void);
-void init_list(songList *list);
-void add_song(songList *list, const char *title, size_t title_length);
-void make_list_from_sd(songList *list, const char *directory);
+void init_list(void);
+void add_song(const char* title, size_t title_length);
+void make_list_from_sd(const char *directory);
 void display_song_list(void);
 void read_selected_song(void);
 void init_spi1_slow(void);
@@ -79,29 +104,6 @@ void disable_sdcard(void);
 void init_sdcard_io(void);
 void sdcard_io_high_speed(void);
 void init_lcd_spi(void);
-
-// structure of song list from WAV file
-typedef struct {
-  char song_title[MAX_SONGS][MAX_TITLE_LENGTH];  
-  int count;
-} songList;
-
-// Structure of WAV File Header
-struct WavFileHeader {
-  char chunk_id[4];
-  int chunk_size;
-  int format;
-  char subchunk1_id[4];
-  int subchunk1_size;
-  short int audio_format;
-  short int num_channels;
-  int sample_rate;
-  int byte_rate;
-  short int block_align;
-  short int bits_per_sample;
-  char subchunk2_id[4];
-  int subchunk2_size;
-} header;
 
 int main(void) {
   // Initialization
@@ -149,7 +151,7 @@ void scan_buttons(void) {
   if (debounce_counter > 0) {
     debounce_counter--;
     return;
-  } // need to check how to set debounce delay
+  }
 
   // Check which button was pressed
   int new_button_state = (GPIOC->IDR & 0xF);
@@ -264,9 +266,16 @@ void init_dac(void) {
 
   // Enable the trigger for the DAC
   DAC->CR |= DAC_CR_TEN1;
+}
 
+void enable_dac(void) {
   // Enable the DAC
   DAC->CR |= 0x1;
+}
+
+void disable_dac(void) {
+  // Enable the DAC
+  DAC->CR &= ~0x1;
 }
 
 // Initialize Timer 6 (SysTick Timer for DAC)
@@ -276,7 +285,7 @@ void init_tim6(void) {
 
   // Set the prescaler and reload value
   TIM6->ARR = 100 - 1;
-  TIM6->PSC = (48000000 / (header.sample_rate * (TIM6->ARR + 1))) - 1;
+  TIM6->PSC = (48000000 / (wav_heaer.sample_rate * (TIM6->ARR + 1))) - 1;
 
   // Set the value that enables a TRGO on an Update event
   TIM6->CR2 &= ~((0x3 << 4) | (0x3 << 5) | (0x3 << 6)); // clear
@@ -287,9 +296,6 @@ void init_tim6(void) {
 
   // Enable the interrupt for the Timer 6
   NVIC_EnableIRQ(TIM6_DAC_IRQn);
-
-  // Enable the Timer 6
-  enable_tim6();
 }
 
 // Enable the Timer 6
@@ -317,7 +323,7 @@ void load_header(void) {
 
   if (fr == FR_OK) {
     if (f_open(&file, file_name, FA_READ) == FR_OK) {
-        fr = f_read(&file, &header, sizeof(header), &bytes_read);
+        fr = f_read(&file, &wav_heaer, sizeof(wav_heaer), &bytes_read);
         previous_offset += bytes_read;
         current_offset += bytes_read;
     }
@@ -379,21 +385,18 @@ void init_dma(void) {
   // Enable transfer-complete interrupt
   DMA1_Channel3->CCR |= DMA_CCR_TCIE;
 
-  // Enable DMA channel
-  DMA1_Channel3->CCR |= DMA_CCR_EN;
-
   // Enable DMA1 channel3 interrupt
   NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
 }
 
 // Enable DMA
 void enable_dma(void) {
-  DMA1_Channel1->CCR |= DMA_CCR_CIRC;
+  DMA1_Channel3->CCR |= DMA_CCR_EN;
 }
 
 // Disable DMA
 void disable_dma(void) {
-  DMA1_Channel1->CCR &= ~DMA_CCR_CIRC;
+  DMA1_Channel3->CCR &= ~DMA_CCR_EN;
 }
 
 // Handle interrupt by DMA
@@ -414,13 +417,17 @@ void play_song(void) {
   // Load first chunk of data
   load_audio_data(HALF_BUFFER_SIZE);
 
-  // Enable DMA
-  // Enable TIM6
+  // Enable DMA, DAC, and TIM6
+  enable_dac();
+  enable_dma();
+  enable_tim6();
 }
 
 // Stop a song
 void stop_song(void) {
+  // Disable DMA, DAC, and TIM6
   disable_dma();
+  disable_dac();
   disable_tim6();
 
   // Update data offset
@@ -438,32 +445,32 @@ void resume_song(void) {
 }
 
 // 1. initialize song list
-void init_list(songList *list){
-  list->count = 0;
+void init_list(void){
+  song_infor.count = 0;
 }
 
 // 2. add songs to the song_list
-void add_song(songList *list, const char *title, size_t title_length){ 
-  if (list->count < MAX_SONGS) {
-    strncpy(list->song_title[list->count], title, title_length);
-    list->song_title[list->count][title_length] = '\0';  // 마지막 인덱스에 널 문자 추가
-    list->count++; 
+void add_song(const char* title, size_t title_length){ 
+  if (song_infor.count < MAX_SONGS) {
+    strncpy(song_infor.song_title[song_infor.count], title, title_length);
+    song_infor.song_title[song_infor.count][title_length] = '\0';  // 마지막 인덱스에 널 문자 추가
+    song_infor.count++; 
   } else {
     printf("cannot add more songs.\n");
   }
 }
 
-void make_list_from_sd(songList *list, const char *directory) {
-    init_list(list);
+void make_list_from_sd(const char *directory) {
+    init_list();
 
     fr = f_opendir(&dir, directory); 
     if (fr == FR_OK) {
-        while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0 && list->count < MAX_SONGS) {
+        while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0 && song_infor.count < MAX_SONGS) {
             const char *filename = fno.fname;  
             const char *extension = strrchr(filename, '.');  
             if (extension != NULL && strcmp(extension, ".wav") == 0) {  
                 size_t title_length = extension - filename;  
-                add_song(list, filename, title_length);  
+                add_song(filename, title_length);  
             }
         f_closedir(&dir);
         } 
