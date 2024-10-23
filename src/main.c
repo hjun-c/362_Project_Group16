@@ -399,12 +399,12 @@ void disable_dma(void) {
 // Handle interrupt by DMA
 void DMA1_Channel3_IRQHandler(void) {
   if (DMA1->ISR & DMA_ISR_HTIF3) {
-    DMA1->IFCR |= DMA_IFCR_CHTIF3; // clear half-transfer interrupt flag
+    DMA1->IFCR &= ~DMA_IFCR_CHTIF3; // clear half-transfer interrupt flag
     load_audio_data(HALF_BUFFER_SIZE);
   }
 
   if (DMA1->ISR & DMA_ISR_TCIF3) {
-    DMA1->IFCR |= DMA_IFCR_CTCIF3; // clear transfer-complete interrupt flag
+    DMA1->IFCR &= ~DMA_IFCR_CTCIF3; // clear transfer-complete interrupt flag
     load_audio_data(HALF_BUFFER_SIZE);
   }
 }
