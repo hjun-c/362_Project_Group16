@@ -17,6 +17,7 @@
 #define HALF_BUFFER_SIZE 4000
 #define DEBOUNCE_TIME 15
 #define MAX_SONGS 10
+#define MAX_TITLE_LENGTH 25
 #define CURSOR_X_POS 10
 #define TITLE_X_POS 30
 #define Y_SPACING 20
@@ -25,6 +26,8 @@
 FIL file;
 FATFS fatfs;
 FRESULT fr;
+DIR dir; // structure for the directory
+FILINFO fno; // File information structure
 uint32_t bytes_read = 0;
 uint16_t audio_buffer[AUDIO_BUFFER_SIZE]; // buffer for DMA half-transfer
 int debounce_counter = 0;
@@ -41,6 +44,47 @@ char song_list[MAX_SONGS]; // list of song titles in SD card
 char cursor = '>';
 
 // Function Declaration
+void internal_clock(void);
+void init_buttons(void);
+void scan_buttons(void);
+void init_tim7(void);
+void TIM7_IRQHandler(void);
+void handle_button1(void);
+void handle_button2(void);
+void handle_button3(void);
+void handle_button4(void);
+void init_dac(void);
+void init_tim6(void);
+void enable_tim6(void);
+void disable_tim6(void);
+void TIM6_DAC_IRQHandler(void);
+void load_header(void);
+void load_audio_data(uint32_t bytes_to_read);
+void update_offset(void);
+void init_dma(void);
+void enable_dma(void);
+void disable_dma(void);
+void DMA1_Channel3_IRQHandler(void);
+void play_song(void);
+void stop_song(void);
+void resume_song(void);
+void init_list(songList *list);
+void add_song(songList *list, const char *title, size_t title_length);
+void make_list_from_sd(songList *list, const char *directory);
+void display_song_list(void);
+void read_selected_song(void);
+void init_spi1_slow(void);
+void enable_sdcard(void);
+void disable_sdcard(void);
+void init_sdcard_io(void);
+void sdcard_io_high_speed(void);
+void init_lcd_spi(void);
+
+// structure of song list from WAV file
+typedef struct {
+  char song_title[MAX_SONGS][MAX_TITLE_LENGTH];  
+  int count;
+} songList;
 
 // Structure of WAV File Header
 struct WavFileHeader {
@@ -58,6 +102,29 @@ struct WavFileHeader {
   char subchunk2_id[4];
   int subchunk2_size;
 } header;
+
+int main(void) {
+  // Initialization
+  internal_clock();
+  init_buttons();
+  init_tim7();
+  init_dac();
+  init_tim6();
+  init_dma();
+  init_lcd_spi();
+  init_sdcard_io();
+  init_spi1_slow();
+
+  // Read song list from SD card
+  
+
+  // Display song list
+  display_song_list();
+
+  for (;;) {
+
+  }
+}
 
 // Initialize buttons
 void init_buttons(void) {
@@ -144,7 +211,7 @@ void handle_button1(void) {
 // Move the cursor down
 void handle_button2(void) {
   // move the cursor down
-  if (song_idx < MAX_SONGS) {
+  if (song_idx < (MAX_SONGS - 1)) {
     LCD_DrawChar(CURSOR_X_POS, cursor_y_pos, WHITE, BLACK, ' ', 15, 1); // remove previous cursor
     cursor_y_pos += Y_SPACING;
     song_idx++;
@@ -156,8 +223,16 @@ void handle_button2(void) {
 void handle_button3(void) {
   is_playing = 1;
   is_stopped = 0;
+
+  // Reset offsets
+  previous_offset = 0;
+  current_offset = 0;
+  buffer_offset = 0;
+
   read_selected_song(); // get song title
-  // play song
+  load_header(); // load WAV Header
+  play_song(); // play a song
+
 }
 
 // Resume or stop a song
@@ -336,6 +411,9 @@ void DMA1_Channel3_IRQHandler(void) {
 
 // Play a song
 void play_song(void) {
+  // Load first chunk of data
+  load_audio_data(HALF_BUFFER_SIZE);
+
   // Enable DMA
   // Enable TIM6
 }
@@ -359,9 +437,41 @@ void resume_song(void) {
   enable_tim6();
 }
 
-// Read the file names in SD card and store them in a song list
-void read_song_list(void) {
+// 1. initialize song list
+void init_list(songList *list){
+  list->count = 0;
+}
 
+// 2. add songs to the song_list
+void add_song(songList *list, const char *title, size_t title_length){ 
+  if (list->count < MAX_SONGS) {
+    strncpy(list->song_title[list->count], title, title_length);
+    list->song_title[list->count][title_length] = '\0';  // 마지막 인덱스에 널 문자 추가
+    list->count++; 
+  } else {
+    printf("cannot add more songs.\n");
+  }
+}
+
+void make_list_from_sd(songList *list, const char *directory) {
+    init_list(list);
+
+    fr = f_opendir(&dir, directory); 
+    if (fr == FR_OK) {
+        while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0 && list->count < MAX_SONGS) {
+            const char *filename = fno.fname;  
+            const char *extension = strrchr(filename, '.');  
+            if (extension != NULL && strcmp(extension, ".wav") == 0) {  
+                size_t title_length = extension - filename;  
+                add_song(list, filename, title_length);  
+            }
+        f_closedir(&dir);
+        } 
+    }
+    else 
+    {
+        printf("cannot open directory\n");
+    }
 }
 
 // Display a song list on TFT display
